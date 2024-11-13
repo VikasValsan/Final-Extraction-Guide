@@ -1,0 +1,177 @@
+STEP 1:  unzip osfz-files
+unzip the .osfz with 7zip and put it in the folder /**extracted**. subfolder won’t be scanned by the scripts then move the .osfz to the folder /processed. use subfolders if needed.
+
+
+
+STEP 2: Create csv for every single osf (fast)
+
+import numpy as np
+import libosf
+import csv
+from pathlib import Path
+from tqdm import tqdm
+import concurrent.futures
+EXAMPLE_DIR = Path(__file__).absolute().parent
+DECOMPRESSED_DIR = EXAMPLE_DIR / "extracted"
+
+def process_file(osf_file):
+    esp_channel_prefixes = ['esp32-28iZ.co2_temp', 'esp32-28hS.t_ir', 'esp32-28iZ.co2_rh', 'esp32-28j7.t_ir', 'esp32-28hU.co2_rh', 'esp32-28hU.co2_temp', 'esp32-228K.t_g', 'esp32-228K.co2', 'esp32-28hR.t_ir', 'esp32-28hR.rh', 'esp32-28hU.t_g', 'esp32-28iZ.co2', 'esp32-28jk.co2', 'esp32-28jk.t_g', 'esp32-28jk.co2_rh', 'esp32-28j7.t_g', 'esp32-28hR.co2', 'esp32-28j7.co2_rh', 'esp32-28hU.t_db', 'esp32-28jk.t_ir', 'esp32-28j7.co2', 'esp32-28j7.t_db', 'esp32-28iZ.rh', 'esp32-28iZ.t_g', 'esp32-28hR.co2_temp', 'esp32-28hU.t_ir', 'esp32-28j7.rh', 'esp32-28hS.co2_temp', 'esp32-28hS.t_g', 'esp32-28iv.co2_rh', 'esp32-28iv.t_g', 'esp32-28hR.t_db', 'esp32-228K.co2_temp', 'esp32-28hR.t_g', 'esp32-28jk.rh', 'esp32-228K.rh', 'esp32-228K.t_db', 'esp32-28hS.co2', 'esp32-28hS.t_db', 'esp32-28hU.co2', 'esp32-28iv.t_db', 'esp32-28hU.rh', 'esp32-228K.co2_rh', 'esp32-28iZ.t_db', 'esp32-28jk.t_db', 'esp32-28iv.co2_temp', 'esp32-28iZ.t_ir', 'esp32-28j7.co2_temp', 'esp32-28hS.rh', 'esp32-28jk.co2_temp', 'esp32-228K.t_ir', 'esp32-28iv.co2', 'esp32-28hS.co2_rh', 'esp32-28iv.t_ir', 'esp32-28hR.co2_rh', 'esp32-28iv.rh', 'Colibri.Speed', 'Dosto.Speed', 'Dosto.Applied.OutdoorTemperature', 'Dosto.Desired.OutdoorTemperature', 'mvb__HVAC_ProVl4403_value', 'mvb__HVAC_ProVl4003_value', 'Colibri.Latitude_value', 'Colibri.Longitude_value' ]
+    with libosf.read_file(osf_file) as f:
+        channels = f.channels()
+        esp_channels = [c for c in channels if any(c.name.startswith(prefix) for prefix in esp_channel_prefixes) and "timestamp" not in c.name.lower() and "unix" not in c.name.lower()]
+
+    file_data = [[] for _ in esp_channels]
+    with libosf.read_file(osf_file) as f:
+        for i, channel in enumerate(esp_channels):
+            try:
+                samples = np.array(f.get_samples([channel.name]))
+                if samples.size > 0:
+                    times = samples[1]
+                    values = samples[0]
+                    file_data[i].extend(zip(times, values))
+            except Exception as e:
+                print(f"Error processing {channel.name} from {osf_file.name} - {str(e)}")
+
+    return esp_channels, file_data
+
+def export_to_csv(osf_file):
+    csv_filename = osf_file.with_suffix('.csv')
+    esp_channels, file_data = process_file(osf_file)
+
+    with open(csv_filename, 'w', newline='') as csvfile:
+        csv_writer = csv.writer(csvfile)
+
+        # Write header
+        header = []
+        for channel in esp_channels:
+            header.extend([f"{channel.name}_timestamp", f"{channel.name}_value"])
+        csv_writer.writerow(header)
+
+        # Write data rows
+        max_length = max(len(channel_data) for channel_data in file_data)
+        for i in range(max_length):
+            row = []
+            for channel_data in file_data:
+                if i < len(channel_data):
+                    timestamp, value = channel_data[i]
+                    # Convert timestamp to datetime64
+                    timestamp = np.datetime64(int(timestamp), 'ns')
+                    row.extend([timestamp, value])
+                else:
+                    row.extend(['', ''])
+            csv_writer.writerow(row)
+
+    return f"Processed {osf_file.name}"
+def process_all_files():
+    osf_files = list(DECOMPRESSED_DIR.glob("*.osf"))
+    if not osf_files:
+        print("No OSF files found in the /decompressed directory.")
+        return
+
+    print(f"Found {len(osf_files)} OSF files in the /extracted directory.")
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(export_to_csv, osf_file) for osf_file in osf_files]
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(osf_files), desc="Processing OSF files"):
+            print(future.result())
+    print("\nAll OSF files have been processed and exported to individual CSV files.")
+if __name__ == "__main__":
+    process_all_files()
+
+
+STEP 3: Merge all csv-files from the subfolder
+
+
+
+import os
+import pandas as pd
+import glob
+from tqdm import tqdm
+
+# Set the path to the subfolder containing CSV files
+path = 'csv'
+
+# Use glob to get all the CSV files in the subfolder
+all_files = glob.glob(os.path.join(path, "*.csv"))
+
+# Create an empty list to store the dataframes
+df_list = []
+
+# Loop through all files and read them into dataframes with a progress bar
+for filename in tqdm(all_files, desc="Reading CSV files"):
+    try:
+        df = pd.read_csv(filename, index_col=None, header=0)
+        df_list.append(df)
+    except pd.errors.EmptyDataError:
+        print(f"Empty file detected and skipped: {filename}")
+
+
+# Concatenate all dataframes in the list with a progress bar
+print("Merging dataframes...")
+merged_df = pd.concat(tqdm(df_list, desc="Merging"), axis=0, ignore_index=True)
+
+# Save the merged dataframe to a new CSV file
+merged_df.to_csv('raw_channel_data.csv', index=False)
+
+print("All CSV files have been merged into 'raw_channel_data.csv'")
+
+
+
+
+STEP 4: Create a new clean CSV file
+
+
+
+
+
+import pandas as pd
+
+# Load the CSV file
+file_path = 'raw_channel_data.csv'
+data = pd.read_csv(file_path)
+
+# Function to process each timestamp column
+def process_timestamp_column(data, timestamp_col, value_col):
+    # Convert timestamp to datetime
+    data[timestamp_col] = pd.to_datetime(data[timestamp_col], errors='coerce')
+    
+    # Round to nearest full minute
+    data['rounded_timestamp'] = data[timestamp_col].dt.round('T')
+    
+    # Group by rounded timestamp and select the value closest to the full minute
+    nearest_values = data.groupby('rounded_timestamp').apply(
+        lambda x: x.loc[(x[timestamp_col] - x['rounded_timestamp']).abs().idxmin(), value_col]
+    ).reset_index(name=value_col)
+    
+    return nearest_values
+
+# Identify all timestamp columns
+timestamp_columns = [col for col in data.columns if 'timestamp' in col]
+
+# Initialize an empty dataframe for the final consolidated results
+final_df = pd.DataFrame()
+
+# Process each timestamp column and merge the results
+for timestamp_col in timestamp_columns:
+    # Find the corresponding value column
+    value_col = timestamp_col.replace('timestamp', 'value')
+    
+    # Check if the value column exists
+    if value_col in data.columns:
+        # Process the timestamp and value columns
+        processed_data = process_timestamp_column(data, timestamp_col, value_col)
+        
+        # Merge the processed data into the final dataframe
+        if final_df.empty:
+            final_df = processed_data
+        else:
+            final_df = pd.merge(final_df, processed_data, on='rounded_timestamp', how='outer')
+
+# Rename the 'rounded_timestamp' column to 'timestamp' and sort by timestamp
+final_df = final_df.rename(columns={'rounded_timestamp': 'timestamp'}).sort_values(by='timestamp')
+
+# Save the final dataframe to a new CSV file
+output_file_path = 'clean_channel_data.csv'
+final_df.to_csv(output_file_path, index=False)
+
+print(f"Processed data saved to {output_file_path}")
